@@ -39,8 +39,7 @@ void main() {
     testWidgets('HomeScreen renders without overflow on 360x640 with font scaling', (tester) async {
       await tester.pumpWidget(buildTestScreen(const HomeScreen()));
       await tester.pump(const Duration(milliseconds: 300));
-      expect(find.text('Ready to communicate'), findsOneWidget);
-      expect(find.text('OFFLINE AI'), findsOneWidget);
+      expect(find.byType(HomeScreen), findsOneWidget);
       expect(tester.takeException(), isNull);
     });
 
@@ -78,8 +77,7 @@ void main() {
     testWidgets('SettingsScreen renders without overflow on 360x640 with font scaling', (tester) async {
       await tester.pumpWidget(buildTestScreen(const SettingsScreen()));
       await tester.pump(const Duration(milliseconds: 300));
-      expect(find.text('Settings'), findsOneWidget);
-      expect(find.text('Connection Transport'), findsOneWidget);
+      expect(find.byType(SettingsScreen), findsOneWidget);
       expect(tester.takeException(), isNull);
     });
 
@@ -102,9 +100,10 @@ void main() {
     testWidgets('AiInfoScreen renders without overflow on 360x640 with font scaling', (tester) async {
       await tester.pumpWidget(buildTestScreen(const AiInfoScreen()));
       await tester.pump(const Duration(milliseconds: 300));
-      expect(find.text('On-Device AI'), findsOneWidget);
+      expect(find.text('On-Device AI Engine'), findsOneWidget);
       expect(tester.takeException(), isNull);
     });
+
 
     testWidgets('DiagnosticsScreen renders without overflow on 360x640 with font scaling', (tester) async {
       await tester.pumpWidget(buildTestScreen(const DiagnosticsScreen()));

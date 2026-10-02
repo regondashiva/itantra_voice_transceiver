@@ -61,11 +61,29 @@ class ConnectionNotifier extends Notifier<ConnectionStateModel> {
         connectedDevice: commService.connectedDevice,
       );
     });
-    ref.onDispose(sub.cancel);
+
+    final repo = ref.read(deviceRepositoryProvider);
+    final devSub = repo.watchDiscoveredDevices().listen((devices) {
+      final filtered = devices
+          .where((d) => d.connectionType == state.preferredTransport)
+          .toList();
+      state = state.copyWith(
+        discoveredDevices: filtered,
+      );
+    });
+
+    ref.onDispose(() {
+      sub.cancel();
+      devSub.cancel();
+    });
+
+    // Trigger initial device discovery immediately on start
+    Future.microtask(() => scanDevices());
   }
 
   void setPreferredTransport(ConnectionType type) {
     state = state.copyWith(preferredTransport: type);
+    scanDevices();
   }
 
   Future<void> scanDevices() async {

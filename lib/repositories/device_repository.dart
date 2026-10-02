@@ -9,8 +9,13 @@ class DeviceRepository {
   DeviceModel? _connectedDevice;
 
   final _deviceListController = StreamController<List<DeviceModel>>.broadcast();
+  StreamSubscription? _discoverySub;
 
-  DeviceRepository({required this.discoveryService});
+  DeviceRepository({required this.discoveryService}) {
+    _discoverySub = discoveryService.discoveredDevicesStream.listen((devices) {
+      _deviceListController.add(devices);
+    });
+  }
 
   DeviceModel? get connectedDevice => _connectedDevice;
 
@@ -32,6 +37,7 @@ class DeviceRepository {
       _deviceListController.stream;
 
   void dispose() {
+    _discoverySub?.cancel();
     _deviceListController.close();
   }
 }

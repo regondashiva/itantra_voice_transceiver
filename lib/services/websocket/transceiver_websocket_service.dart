@@ -1,14 +1,18 @@
+// ignore_for_file: prefer_initializing_formals
 import 'dart:async';
 import 'dart:convert';
 import 'dart:developer' as dev;
+import 'dart:typed_data';
 import 'package:web_socket_channel/web_socket_channel.dart';
+import '../../contracts/transceiver_packet.dart';
 import '../../core/config/api_config.dart';
 import '../../models/connection_model.dart';
 import '../../models/device_model.dart';
 import '../../models/message_model.dart';
 import '../location/location_service.dart';
 
-/// Real WebSocket Gateway Client for bidirectional real-time packet exchange.
+/// Real WebSocket Gateway Client for bidirectional real-time Protobuf packet exchange.
+/// Implements Section 5 of BACKEND_API_INTEGRATION_GUIDE_ITantra.
 class TransceiverWebSocketService {
   final LocationService? _locationService;
   WebSocketChannel? _channel;
@@ -17,21 +21,24 @@ class TransceiverWebSocketService {
   bool _isDisposed = false;
 
   TransceiverWebSocketService({LocationService? locationService})
-      // ignore: prefer_initializing_formals
       : _locationService = locationService;
 
   final _incomingMessageController = StreamController<MessageModel>.broadcast();
+  final _incomingProtobufController = StreamController<TransceiverPacket>.broadcast();
   final _incomingSosController = StreamController<Map<String, dynamic>>.broadcast();
   final _statusController = StreamController<ConnectionStatus>.broadcast();
 
   ConnectionStatus _status = ConnectionStatus.disconnected;
 
+  LocationService? get locationService => _locationService;
   ConnectionStatus get status => _status;
   Stream<MessageModel> get incomingMessages => _incomingMessageController.stream;
+  Stream<TransceiverPacket> get incomingProtobufPackets => _incomingProtobufController.stream;
   Stream<Map<String, dynamic>> get incomingSosStream => _incomingSosController.stream;
   Stream<ConnectionStatus> get statusStream => _statusController.stream;
 
-  /// Connect to the WebSocket stream gateway
+  /// Connect to the WebSocket stream gateway (`ws://<HOST>:3000/v1/transceiver/channel`)
+
   void connect() {
     if (_isDisposed) return;
     if (_status == ConnectionStatus.connecting || _status == ConnectionStatus.connected) return;
@@ -63,7 +70,6 @@ class TransceiverWebSocketService {
 
       _setStatus(ConnectionStatus.connected);
       _startHeartbeat();
-      subscribeToChannel(ApiConfig.activeChannelId);
     } catch (e) {
       dev.log('[WebSocketService] Exception during connect: $e');
       _setStatus(ConnectionStatus.disconnected);
@@ -74,7 +80,9 @@ class TransceiverWebSocketService {
   void _setStatus(ConnectionStatus newStatus) {
     if (_status != newStatus) {
       _status = newStatus;
-      _statusController.add(_status);
+      if (!_statusController.isClosed) {
+        _statusController.add(_status);
+      }
     }
   }
 
@@ -82,10 +90,14 @@ class TransceiverWebSocketService {
     _heartbeatTimer?.cancel();
     _heartbeatTimer = Timer.periodic(const Duration(seconds: 30), (_) {
       if (_status == ConnectionStatus.connected) {
-        sendFrame('HEARTBEAT', {
-          'batteryPct': 88.0,
-          'rssiDbm': -64.0,
-        });
+        final hbPacket = TransceiverPacket(
+          packetId: 'hb_${DateTime.now().millisecondsSinceEpoch}',
+          senderId: ApiConfig.callsign,
+          text: 'HEARTBEAT_ACK',
+          intent: 'HEARTBEAT',
+          priority: PacketPriority.normal,
+        );
+        sendProtobufPacket(hbPacket);
       }
     });
   }
@@ -102,101 +114,137 @@ class TransceiverWebSocketService {
     });
   }
 
-  /// Subscribe socket to specific tactical channel
+  /// Subscribe to specific channel
   void subscribeToChannel(String channelId) {
-    sendFrame('SUBSCRIBE', {
-      'channelId': channelId,
-    });
+    ApiConfig.activeChannelId = channelId;
+    final packet = TransceiverPacket(
+      packetId: 'sub_${DateTime.now().millisecondsSinceEpoch}',
+      senderId: ApiConfig.callsign,
+      text: channelId,
+      intent: 'SUBSCRIBE',
+    );
+    sendProtobufPacket(packet);
   }
 
-  /// Send generic JSON envelope
-  void sendFrame(String event, Map<String, dynamic> data) {
+  /// Sends a binary Protobuf packet (<80 bytes) over WebSocket
+  void sendProtobufPacket(TransceiverPacket packet) {
     if (_channel == null || _status != ConnectionStatus.connected) return;
-
-    final frame = {
-      'event': event,
-      'callsign': ApiConfig.callsign,
-      'timestamp': DateTime.now().millisecondsSinceEpoch,
-      'data': data,
-    };
-
     try {
-      _channel!.sink.add(jsonEncode(frame));
+      final bytes = packet.toProtobufBytes();
+      dev.log('[WebSocketService] Sending Protobuf packet (${bytes.length} bytes): "${packet.text}"');
+      _channel!.sink.add(bytes);
     } catch (e) {
-      dev.log('[WebSocketService] Failed to send frame $event: $e');
+      dev.log('[WebSocketService] Error sending Protobuf packet: $e');
     }
   }
 
-  /// Send compact-text packet over WebSocket
+  /// Send compact-text packet over WebSocket (converts to Protobuf)
   void sendPacket(MessageModel message) {
-    sendFrame('INGEST_PACKET', {
-      'packetId': message.id,
-      'channelId': ApiConfig.activeChannelId,
-      'sourceLanguage': 'en',
-      'targetLanguage': 'te',
-      'compactTextPayload': message.text,
-      'priority': message.isEmergency ? 'PRIORITY_EMERGENCY_SOS' : 'PRIORITY_ROUTINE',
-      'latitude': _locationService?.latitude ?? 17.3850,
-      'longitude': _locationService?.longitude ?? 78.4867,
-    });
+    final packet = TransceiverPacket(
+      packetId: message.id,
+      senderId: ApiConfig.callsign,
+      text: message.text,
+      priority: message.isEmergency ? PacketPriority.emergency : PacketPriority.normal,
+      timestampMs: message.timestamp.millisecondsSinceEpoch,
+      intent: message.isEmergency ? 'SOS' : 'TALK',
+    );
+    sendProtobufPacket(packet);
   }
 
   /// Send emergency SOS alert over WebSocket
   void sendSos(MessageModel message) {
-    sendFrame('CRITICAL_SOS', {
-      'packetId': message.id,
-      'channelId': ApiConfig.activeChannelId,
-      'compactTextPayload': message.text,
-      'priority': 'PRIORITY_EMERGENCY_SOS',
-      'latitude': _locationService?.latitude ?? 17.3850,
-      'longitude': _locationService?.longitude ?? 78.4867,
-    });
+    final packet = TransceiverPacket(
+      packetId: message.id,
+      senderId: ApiConfig.callsign,
+      text: message.text,
+      priority: PacketPriority.emergency,
+      timestampMs: message.timestamp.millisecondsSinceEpoch,
+      intent: 'SOS',
+    );
+    sendProtobufPacket(packet);
   }
 
   void _handleIncomingData(dynamic rawData) {
     try {
-      final json = jsonDecode(rawData.toString()) as Map<String, dynamic>;
-      final event = json['event'] as String? ?? '';
-      final senderCallsign = json['callsign'] as String? ?? 'REMOTE';
-      final data = (json['data'] as Map<String, dynamic>?) ?? {};
+      if (rawData is List<int>) {
+        // Incoming Protobuf binary data
+        final bytes = rawData is Uint8List ? rawData : Uint8List.fromList(rawData);
+        final packet = TransceiverPacket.fromProtobufBytes(bytes);
+        dev.log('[WebSocketService] Received incoming Protobuf packet from ${packet.senderId}: "${packet.text}"');
 
-      switch (event) {
-        case 'INGEST_PACKET_RECEIVED':
-          final payload = data['compactTextPayload'] as String? ?? '';
-          final packetId = data['packetId'] as String? ?? DateTime.now().millisecondsSinceEpoch.toString();
-          final isEmergency = data['priority'] == 'PRIORITY_EMERGENCY_SOS';
+        if (!_incomingProtobufController.isClosed) {
+          _incomingProtobufController.add(packet);
+        }
 
-          final incoming = MessageModel(
-            id: packetId,
-            text: payload,
-            sender: senderCallsign == ApiConfig.callsign ? 'You' : senderCallsign,
-            receiver: 'You',
-            timestamp: DateTime.now(),
-            language: 'Tactical Stream',
-            status: MessageStatus.received,
-            isEmergency: isEmergency,
-            connectionType: ConnectionType.wifiDirect,
-          );
+        final msg = MessageModel(
+          id: packet.packetId,
+          text: packet.text,
+          sender: packet.senderId == ApiConfig.callsign ? 'You' : packet.senderId,
+          receiver: 'You',
+          timestamp: DateTime.fromMillisecondsSinceEpoch(packet.timestampMs),
+          language: packet.languageCode,
+          status: MessageStatus.received,
+          isEmergency: packet.isEmergency,
+          connectionType: ConnectionType.wifiDirect,
+        );
 
-          _incomingMessageController.add(incoming);
-          break;
+        if (!_incomingMessageController.isClosed) {
+          _incomingMessageController.add(msg);
+        }
 
-        case 'CRITICAL_SOS_TRIGGERED':
+        if (packet.isEmergency && !_incomingSosController.isClosed) {
           _incomingSosController.add({
-            'incidentId': data['incidentId'] ?? '',
-            'callsign': senderCallsign,
-            'packetId': data['packetId'] ?? '',
-            'alertType': data['alertType'] ?? 'CRITICAL_SOS_BROADCAST',
+            'incidentId': packet.packetId,
+            'callsign': packet.senderId,
+            'text': packet.text,
+            'alertType': 'CRITICAL_SOS_BROADCAST',
           });
-          break;
+        }
+      } else if (rawData is String) {
+        // Fallback for JSON strings
+        final json = jsonDecode(rawData) as Map<String, dynamic>;
+        final event = json['event'] as String? ?? '';
+        final senderCallsign = json['callsign'] as String? ?? 'REMOTE';
+        final data = (json['data'] as Map<String, dynamic>?) ?? {};
 
-        case 'HEARTBEAT_ACK':
-          dev.log('[WebSocketService] Heartbeat acknowledged by server');
-          break;
+        switch (event) {
+          case 'INGEST_PACKET_RECEIVED':
+            final payload = data['compactTextPayload'] as String? ?? '';
+            final packetId = data['packetId'] as String? ?? DateTime.now().millisecondsSinceEpoch.toString();
+            final isEmergency = data['priority'] == 'PRIORITY_EMERGENCY_SOS';
 
-        default:
-          dev.log('[WebSocketService] Received unhandled event: $event');
-          break;
+            final incoming = MessageModel(
+              id: packetId,
+              text: payload,
+              sender: senderCallsign == ApiConfig.callsign ? 'You' : senderCallsign,
+              receiver: 'You',
+              timestamp: DateTime.now(),
+              language: 'Tactical Stream',
+              status: MessageStatus.received,
+              isEmergency: isEmergency,
+              connectionType: ConnectionType.wifiDirect,
+            );
+
+            if (!_incomingMessageController.isClosed) {
+              _incomingMessageController.add(incoming);
+            }
+            break;
+
+          case 'CRITICAL_SOS_TRIGGERED':
+            if (!_incomingSosController.isClosed) {
+              _incomingSosController.add({
+                'incidentId': data['incidentId'] ?? '',
+                'callsign': senderCallsign,
+                'packetId': data['packetId'] ?? '',
+                'alertType': data['alertType'] ?? 'CRITICAL_SOS_BROADCAST',
+              });
+            }
+            break;
+
+          default:
+            dev.log('[WebSocketService] Received event: $event');
+            break;
+        }
       }
     } catch (e) {
       dev.log('[WebSocketService] Error parsing incoming data: $e');
@@ -214,8 +262,17 @@ class TransceiverWebSocketService {
   void dispose() {
     _isDisposed = true;
     disconnect();
-    _incomingMessageController.close();
-    _incomingSosController.close();
-    _statusController.close();
+    if (!_incomingMessageController.isClosed) {
+      _incomingMessageController.close();
+    }
+    if (!_incomingProtobufController.isClosed) {
+      _incomingProtobufController.close();
+    }
+    if (!_incomingSosController.isClosed) {
+      _incomingSosController.close();
+    }
+    if (!_statusController.isClosed) {
+      _statusController.close();
+    }
   }
 }

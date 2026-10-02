@@ -50,7 +50,7 @@ class AppScaffold extends StatelessWidget {
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
             ),
-            if (subtitleWidget != null) subtitleWidget!,
+            ?subtitleWidget,
           ],
         ),
         actions: actions,

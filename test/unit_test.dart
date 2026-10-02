@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:itantra_voice_transceiver/core/constants/app_constants.dart';
@@ -7,9 +8,35 @@ import 'package:itantra_voice_transceiver/models/language_model.dart';
 import 'package:itantra_voice_transceiver/models/message_model.dart';
 import 'package:itantra_voice_transceiver/providers/emergency_provider.dart';
 import 'package:itantra_voice_transceiver/providers/language_provider.dart';
+import 'package:itantra_voice_transceiver/providers/service_providers.dart';
 import 'package:itantra_voice_transceiver/repositories/message_repository.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
+import 'package:itantra_voice_transceiver/core/config/api_config.dart';
+import 'package:itantra_voice_transceiver/services/api/api_service.dart';
+import 'package:itantra_voice_transceiver/services/communication/communication_service.dart';
+
+
+class FakeCommunicationService implements CommunicationService {
+  @override
+  DeviceModel? get connectedDevice => null;
+  @override
+  ConnectionStatus get currentStatus => ConnectionStatus.connected;
+  @override
+  Stream<ConnectionStatus> get connectionStatusStream => const Stream.empty();
+  @override
+  Stream<MessageModel> get incomingMessages => const Stream.empty();
+  @override
+  Future<void> connect(DeviceModel device) async {}
+  @override
+  Future<void> disconnect() async {}
+  @override
+  Future<void> sendMessage(MessageModel message) async {}
+}
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
   group('Model & Constant Tests', () {
     test('LanguageModel equality and string formatting', () {
       const lang1 = LanguageModel(code: 'te', englishName: 'Telugu', nativeName: 'తెలుగు');
@@ -62,10 +89,24 @@ void main() {
     });
   });
 
+
+
   group('Emergency State Transition Tests', () {
     test('Emergency state transitions from Idle -> Confirming -> Sent -> Received -> Idle', () async {
-      final container = ProviderContainer();
-      addTearDown(container.dispose);
+      final mockClient = MockClient((request) async {
+        return http.Response(jsonEncode({'status': 'OK', 'token': 'mock-jwt'}), 200);
+      });
+      final mockApi = ApiService(client: mockClient);
+      final container = ProviderContainer(
+        overrides: [
+          apiServiceProvider.overrideWithValue(mockApi),
+          communicationServiceProvider.overrideWithValue(FakeCommunicationService()),
+        ],
+      );
+      addTearDown(() {
+        container.dispose();
+        mockApi.dispose();
+      });
 
       final notifier = container.read(emergencyProvider.notifier);
       expect(container.read(emergencyProvider).state, EmergencyState.idle);
@@ -122,4 +163,37 @@ void main() {
       repo.dispose();
     });
   });
+
+  group('Backend API Integration Guide Tests', () {
+    test('ApiConfig URLs format correctly for production, emulator and LAN', () {
+      ApiConfig.environment = BackendEnvironment.production;
+      expect(ApiConfig.baseUrl, equals('https://itantra-backend-bwoq.onrender.com'));
+      expect(ApiConfig.wsUrl, equals('wss://itantra-backend-bwoq.onrender.com/v1/transceiver/channel'));
+
+      ApiConfig.environment = BackendEnvironment.emulator;
+      expect(ApiConfig.baseUrl, equals('http://10.0.2.2:3000'));
+      expect(ApiConfig.wsUrl, equals('ws://10.0.2.2:3000/v1/transceiver/channel'));
+
+      ApiConfig.environment = BackendEnvironment.lan;
+      ApiConfig.lanHostIp = '192.168.1.50';
+      expect(ApiConfig.baseUrl, equals('http://192.168.1.50:3000'));
+      expect(ApiConfig.wsUrl, equals('ws://192.168.1.50:3000/v1/transceiver/channel'));
+
+      // Reset to production
+      ApiConfig.environment = BackendEnvironment.production;
+    });
+
+    test('ApiService fallback model manifest returns required AI models', () async {
+      final mockClient = MockClient((request) async {
+        return http.Response('Server unavailable', 503);
+      });
+      final api = ApiService(client: mockClient);
+      final manifest = await api.fetchModelManifest();
+      expect(manifest, isNotEmpty);
+      expect(manifest.any((m) => m['id'].toString().contains('vosk') || m['id'].toString().contains('whisper')), isTrue);
+      expect(manifest.any((m) => m['id'].toString().contains('piper')), isTrue);
+      api.dispose();
+    });
+  });
 }
+

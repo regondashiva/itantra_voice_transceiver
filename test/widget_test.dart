@@ -35,7 +35,7 @@ void main() {
     );
 
     expect(find.text('HOLD TO SPEAK'), findsOneWidget);
-    expect(find.text('Release to send'), findsOneWidget);
+    expect(find.text('Hold to record'), findsOneWidget);
 
     final gesture = await tester.startGesture(tester.getCenter(find.byType(PushToTalkButton)));
     await tester.pump(const Duration(milliseconds: 100));
@@ -45,6 +45,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 100));
     expect(holdEnded, isTrue);
   });
+
 
   testWidgets('EmergencyButton renders and triggers confirmation', (tester) async {
     bool triggered = false;

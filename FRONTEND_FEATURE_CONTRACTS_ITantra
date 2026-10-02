@@ -1,0 +1,110 @@
+# iTantra Frontend Feature Contracts
+
+This document outlines the strict functional contracts for the mobile development team. Each module must be implemented as an isolated service in Flutter (Dart) or via Native Platform Channels (Kotlin), ensuring they can be tested independently.
+
+---
+
+## Module 1: `iTantraTransport` (P2P Mesh Network)
+**Responsibility:** Handle fully offline device-to-device communication without internet routing.
+
+### Contract Interface
+```dart
+abstract class ITantraTransport {
+  /// Initializes Wi-Fi Direct (Aware) or Bluetooth LE
+  Future<void> initialize();
+  
+  /// Discovers nearby devices running the iTantra app
+  Stream<List<PeerDevice>> discoverPeers();
+  
+  /// Connects to a specific peer or mesh group
+  Future<bool> connect(String peerId);
+  
+  /// Sends a binary Protobuf packet (<80 bytes) over the local link
+  Future<void> sendPacket(Uint8List protobufData);
+  
+  /// Stream of incoming raw Protobuf binary packets
+  Stream<Uint8List> get onPacketReceived;
+}
+```
+**Constraints:**
+* Must NOT rely on internet or cellular data.
+* Data transmission must be limited to raw binary `Uint8List` (Protobufs), no heavy JSON packaging.
+
+---
+
+## Module 2: `iTantraVAD` (Voice Activity Detection)
+**Responsibility:** Monitor microphone efficiently, trigger recording only when speech is present.
+
+### Contract Interface
+```dart
+abstract class ITantraVAD {
+  /// Start idle listening (must consume <5% CPU)
+  Future<void> startListening();
+  
+  /// Stop listening and release microphone
+  Future<void> stopListening();
+  
+  /// Emits a continuous audio buffer (16kHz PCM) only when a human is speaking
+  Stream<Uint8List> get onSpeechDetected;
+  
+  /// Fires when 500ms of silence is detected, signaling end of sentence
+  Stream<void> get onSpeechEnded;
+}
+```
+**Constraints:**
+* Must use a TinyML model (e.g., Silero VAD) to minimize battery drain.
+
+---
+
+## Module 3: `iTantraSTT` (Speech-to-Text)
+**Responsibility:** Convert raw audio chunks into text locally.
+
+### Contract Interface
+```dart
+abstract class ITantraSTT {
+  /// Loads the lightweight Vosk model from local storage
+  Future<void> loadModel(String languageCode);
+  
+  /// Processes a complete audio chunk and returns the transcribed text
+  Future<String> transcribe(Uint8List audioPcm16Data);
+}
+```
+**Constraints:**
+* Model must be cached locally (no API calls during inference).
+* Execution time (latency) must be tracked and logged for SIH metrics.
+* **Recommendation:** Use `vosk_flutter` plugin for native Android integration to keep RAM footprint minimal.
+
+---
+
+## Module 4: `iTantraTTS` (Text-to-Speech)
+**Responsibility:** Convert received text back into spoken audio.
+
+### Contract Interface
+```dart
+abstract class ITantraTTS {
+  /// Loads the ONNX Piper TTS model for the specified language
+  Future<void> loadModel(String languageCode);
+  
+  /// Synthesizes and plays audio. If [isEmergency] is true, overrides system volume.
+  Future<void> speak(String text, {bool isEmergency = false});
+}
+```
+**Constraints:**
+* Emergency alerts must use `AudioManager.STREAM_ALARM` in Android to bypass DND (Do Not Disturb) or low media volumes.
+* Playback must be non-interruptible for High Priority messages.
+
+---
+
+## Module 5: `WalkieTalkieOrchestrator`
+**Responsibility:** Bind the above modules together to create the full transceiver loop.
+
+### Flow Contract
+1. **Push-To-Talk (PTT) Pressed** -> `ITantraVAD.startListening()`
+2. **User Speaks** -> VAD pipes audio buffer to memory.
+3. **User Pauses (or PTT Released)** -> VAD triggers `onSpeechEnded`.
+4. `ITantraSTT.transcribe()` processes the buffer into text.
+5. `TransceiverPacket` (Protobuf) is created with the text and intent.
+6. `ITantraTransport.sendPacket()` broadcasts the byte array over Wi-Fi/BLE.
+7. **(On Receiver Device)** `ITantraTransport.onPacketReceived` fires.
+8. Packet is decoded from Protobuf to extract text and priority.
+9. `ITantraTTS.speak()` plays the audio on the receiver.

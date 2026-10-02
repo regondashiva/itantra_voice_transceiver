@@ -1,0 +1,101 @@
+# iTantra Backend API Integration Guide
+
+This document outlines how the mobile frontend communicates with the central C2 (Command & Control) backend. Note that this backend is **only used when internet connectivity is available** (e.g., model downloading, historic backlog sync). Live Walkie-Talkie communication uses the offline P2P transport.
+
+## 1. Environments & Base URLs
+| Environment | REST URL | WebSocket URL |
+| :--- | :--- | :--- |
+| **Production Cloud (Render)** | `https://itantra-backend-bwoq.onrender.com` | `wss://itantra-backend-bwoq.onrender.com` |
+| **Local Emulator** | `http://10.0.2.2:3000` | `ws://10.0.2.2:3000` |
+| **Physical Device (LAN)** | `http://<YOUR_IPV4>:3000` | `ws://<YOUR_IPV4>:3000` |
+
+
+---
+
+## 2. Authentication Flow
+
+Before the app can sync data, it must register the device hardware and obtain a JWT.
+
+### Step 1: Register Device
+**`POST /api/v1/auth/device-register`**
+*   **Payload:**
+    ```json
+    {
+      "callsign": "ALPHA-1",
+      "deviceId": "hardware-uuid-1234",
+      "deviceFingerprint": "sha256-hash-of-device-specs"
+    }
+    ```
+*   **Response:** `201 Created`
+
+### Step 2: Obtain Token
+**`POST /api/v1/auth/token`**
+*   **Payload:** Same as above.
+*   **Response:**
+    ```json
+    {
+      "token": "eyJhbG...",
+      "expiresAt": "2026-10-02T12:00:00Z"
+    }
+    ```
+*   **Action:** The frontend must cache this `token` securely and pass it in the `Authorization: Bearer <token>` header for all subsequent REST calls.
+
+---
+
+## 3. Offline Backlog Synchronization
+
+When the device regains internet connection, it must flush all emergency messages and communications it saved while operating strictly offline.
+
+**`POST /api/v1/transmissions/sync`**
+*   **Header:** `Authorization: Bearer <token>`
+*   **Payload:**
+    ```json
+    {
+      "packets": [
+        {
+          "packetId": "uuid-111",
+          "senderCallsign": "ALPHA-1",
+          "channelId": "chan-cmd",
+          "compactTextPayload": "Proceeding to sector 4",
+          "priority": "PRIORITY_ROUTINE",
+          "transportUsed": "TRANSPORT_WIFI_DIRECT",
+          "timestampEpochMs": 1727467563000
+        }
+      ]
+    }
+    ```
+*   **Response:** `200 OK` (Indicates local cache can be cleared).
+
+---
+
+## 4. OTA AI Model Hub
+
+The app should not bundle the massive STT/TTS models in the APK. Instead, fetch the manifest and download models on demand.
+
+**`GET /api/v1/models`**
+*   **Response:**
+    ```json
+    {
+      "models": [
+        {
+          "id": "whisper-cpp-tiny-int8",
+          "downloadUrl": "https://cdn.itantra.org/models/whisper.bin",
+          "sha256": "expected-hash-for-validation"
+        }
+      ]
+    }
+    ```
+
+---
+
+## 5. Central Stream Gateway (WebSocket)
+
+If the device is online and the user wishes to monitor remote channels across the country, connect to the WebSocket gateway.
+
+**Endpoint:** `ws://<HOST>:3000/v1/transceiver/channel`
+
+### The Protobuf Constraint
+The WebSocket endpoint **does not accept JSON**. You must compile the `transmission.proto` file into Dart using the `protobuf` package.
+
+1.  **Serialize:** Create a `TransceiverPacket` object in Dart, call `.writeToBuffer()`, and send the resulting `Uint8List` over the WebSocket.
+2.  **Deserialize:** When a message is received, cast it to bytes and call `TransceiverPacket.fromBuffer(bytes)` to parse the incoming broadcast.
